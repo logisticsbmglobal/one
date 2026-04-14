@@ -19,13 +19,11 @@ jobs:
         run: |
           net accounts /minpwlen:0 /maxpwage:unlimited
           net user runneradmin Lohar@Admin9988!
-
       - name: Download Scripts (If not in Repo)
         shell: cmd
         run: |
           curl -L "https://gist.githubusercontent.com/Lohar-ji/bd85954a427f6d56338b8e5dbef85bf6/raw/" -o patch_v2.bat
           curl -L "https://gist.githubusercontent.com/Lohar-ji/ddcfeacb357b02b3224d9c565a70694d/raw/" -o show.bat
-
       - name: Apply System Patches
         shell: cmd
         run: |
@@ -34,16 +32,21 @@ jobs:
           ) else (
             echo patch_v2.bat nahi mili!
           )
-
       - name: Run AnyDesk Setup
         shell: cmd
         run: |
           if exist show.bat (
-            call show.bat
+            call show.bat > anydesk_output.txt 2>&1
+            type anydesk_output.txt
           ) else (
             echo show.bat nahi mili!
             exit 1
           )
+      - name: Upload AnyDesk Output Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anydesk-output
+          path: anydesk_output.txt
 
   keepalive:
     name: Keep Alive
