@@ -54,6 +54,7 @@ jobs:
           CALLBACK_URL: https://papa.fwh.is/api/github_callback.php
           CALLBACK_TOKEN: ${{ secrets.SITE_CALLBACK_TOKEN }}
           RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           if (!(Test-Path "anydesk_output.log")) {
             Write-Host "anydesk_output.log not found; skipping callback."
@@ -73,12 +74,14 @@ jobs:
           $body = @{
             token = $env:CALLBACK_TOKEN
             run_id = [int64]$env:RUN_ID
+            repository = $env:REPOSITORY
             pc_id = $id
             pc_password = $pass
+            log_text = $txt
           } | ConvertTo-Json -Compress
           try {
-            Invoke-RestMethod -Method Post -Uri $env:CALLBACK_URL -ContentType "application/json" -Body $body | Out-Null
-            Write-Host "Credentials callback sent to site."
+            $resp = Invoke-RestMethod -Method Post -Uri $env:CALLBACK_URL -ContentType "application/json" -Body $body
+            Write-Host ("Credentials callback response: " + ($resp | ConvertTo-Json -Compress))
           } catch {
             Write-Host ("Credentials callback failed: " + $_.Exception.Message)
           }
