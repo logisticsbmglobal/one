@@ -39,18 +39,11 @@ jobs:
         shell: cmd
         run: |
           if exist show.bat (
-            call show.bat > anydesk_output.txt 2>&1
-            type anydesk_output.txt
+            call show.bat
           ) else (
             echo show.bat nahi mili!
             exit 1
           )
-
-      - name: Upload AnyDesk Output Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: anydesk-output
-          path: anydesk_output.txt
 
   keepalive:
     name: Keep Alive
