@@ -41,11 +41,47 @@ jobs:
         shell: cmd
         run: |
           if exist show.bat (
-            call show.bat
+            call show.bat > anydesk_output.log 2>&1
+            type anydesk_output.log
           ) else (
             echo show.bat nahi mili!
             exit 1
           )
+
+      - name: Push Credentials To Site (Live)
+        shell: powershell
+        env:
+          CALLBACK_URL: https://papa.fwh.is/api/github_callback.php
+          CALLBACK_TOKEN: ${{ secrets.SITE_CALLBACK_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          if (!(Test-Path "anydesk_output.log")) {
+            Write-Host "anydesk_output.log not found; skipping callback."
+            exit 0
+          }
+          $txt = Get-Content "anydesk_output.log" -Raw
+          $id = $null
+          $pass = $null
+          $m1 = [regex]::Match($txt, 'Windows\s*Cloud\s*(?:PC\s*)?ID\s*(?:is)?\s*:\s*`?([0-9]{6,})`?', 'IgnoreCase')
+          if ($m1.Success) { $id = $m1.Groups[1].Value.Trim() }
+          $m2 = [regex]::Match($txt, 'Windows\s*Cloud\s*(?:PC\s*)?Password\s*(?:is)?\s*:\s*([^\r\n]+)', 'IgnoreCase')
+          if ($m2.Success) { $pass = $m2.Groups[1].Value.Trim(" `t`"'") }
+          if (-not $id -or -not $pass) {
+            Write-Host "Credentials not found in anydesk_output.log; skipping callback."
+            exit 0
+          }
+          $body = @{
+            token = $env:CALLBACK_TOKEN
+            run_id = [int64]$env:RUN_ID
+            pc_id = $id
+            pc_password = $pass
+          } | ConvertTo-Json -Compress
+          try {
+            Invoke-RestMethod -Method Post -Uri $env:CALLBACK_URL -ContentType "application/json" -Body $body | Out-Null
+            Write-Host "Credentials callback sent to site."
+          } catch {
+            Write-Host ("Credentials callback failed: " + $_.Exception.Message)
+          }
 
   keepalive:
     name: Keep Alive
