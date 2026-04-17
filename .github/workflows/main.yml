@@ -34,16 +34,18 @@ jobs:
             echo patch_v2.bat nahi mili!
           )
 
-      # Step completes (timeout) so next steps run
       - name: Run AnyDesk Setup (capture, timeout)
         shell: powershell
         run: |
-          if (-not (Test-Path show.bat)) { Write-Host "show.bat nahi mili!"; exit 1 }
+          if (-not (Test-Path show.bat)) {
+            Write-Host "show.bat nahi mili!"
+            exit 1
+          }
 
           $outFile = "show_output.txt"
           if (Test-Path $outFile) { Remove-Item $outFile -Force }
 
-          # Redirect inside cmd (avoids Start-Process redirect conflict)
+          # Redirect inside cmd to avoid Start-Process redirect conflicts
           $cmd = 'call show.bat > "' + $outFile + '" 2>&1'
           $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -NoNewWindow -PassThru
 
@@ -68,7 +70,10 @@ jobs:
           FIREBASE_SA_JSON: ${{ secrets.FIREBASE_SA_JSON }}
           FIREBASE_RTDB_URL: ${{ secrets.FIREBASE_RTDB_URL }}
         run: |
-          if (-not (Test-Path show_output.txt)) { Write-Host "show_output.txt missing"; exit 0 }
+          if (-not (Test-Path show_output.txt)) {
+            Write-Host "show_output.txt missing"
+            exit 0
+          }
 
           $text = Get-Content -Raw -Path show_output.txt
 
@@ -77,37 +82,50 @@ jobs:
 
           $pw = [regex]::Match($text,'Windows\s*Cloud\s*(?:PC\s*)?Password(?:\s+is)?\s*:\s*([^\r\n]+)','IgnoreCase').Groups[1].Value.Trim()
 
-          if (-not $id -or -not $pw) { Write-Host "Credentials not found."; exit 0 }
+          if (-not $id -or -not $pw) {
+            Write-Host "Credentials not found."
+            exit 0
+          }
 
-          $sa = $env:FIREBASE_SA_JSON | ConvertFrom-Json
-          $now = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          @"
+          const admin = require('firebase-admin');
 
-          Add-Type -AssemblyName System.Security
-          function b64url([byte[]]$b){ [Convert]::ToBase64String($b).TrimEnd('=').Replace('+','-').Replace('/','_') }
+          const sa = JSON.parse(process.env.FIREBASE_SA_JSON);
+          const dbURL = process.env.FIREBASE_RTDB_URL;
+          const runId = process.env.GITHUB_RUN_ID;
+          const repo = process.env.GITHUB_REPOSITORY;
+          const pcId = process.env.PC_ID;
+          const pcPassword = process.env.PC_PASSWORD;
 
-          $header = @{ alg="RS256"; typ="JWT" } | ConvertTo-Json -Compress
-          $claims = @{
-            iss=$sa.client_email
-            scope="https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email"
-            aud="https://oauth2.googleapis.com/token"
-            iat=$now
-            exp=$now+3600
-          } | ConvertTo-Json -Compress
+          admin.initializeApp({
+            credential: admin.credential.cert(sa),
+            databaseURL: dbURL
+          });
 
-          $u = (b64url([Text.Encoding]::UTF8.GetBytes($header))) + "." + (b64url([Text.Encoding]::UTF8.GetBytes($claims)))
-          $rsa = [System.Security.Cryptography.RSA]::Create()
-          $rsa.ImportFromPem($sa.private_key)
-          $sig = $rsa.SignData([Text.Encoding]::UTF8.GetBytes($u), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-          $jwt = $u + "." + (b64url($sig))
+          const payload = {
+            pc_id: pcId,
+            pc_password: pcPassword,
+            ts: Math.floor(Date.now() / 1000),
+            repo: repo
+          };
 
-          $tokenResp = Invoke-RestMethod -Method Post -Uri "https://oauth2.googleapis.com/token" -ContentType "application/x-www-form-urlencoded" -Body ("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3:jwt-bearer&assertion=" + $jwt)
-          $access = $tokenResp.access_token
+          admin.database().ref(`runs/${runId}/credentials`).set(payload)
+            .then(() => {
+              console.log(`Firebase write OK: runs/${runId}/credentials`);
+              process.exit(0);
+            })
+            .catch((e) => {
+              console.error("Firebase write failed:", e && e.message ? e.message : e);
+              process.exit(1);
+            });
+          "@ | Out-File -FilePath write_firebase.js -Encoding utf8
 
-          $body = @{ pc_id=$id; pc_password=$pw; ts=$now; repo=$env:GITHUB_REPOSITORY } | ConvertTo-Json -Compress
-          $url = ($env:FIREBASE_RTDB_URL.TrimEnd('/')) + "/runs/$($env:GITHUB_RUN_ID)/credentials.json?access_token=$access"
+          npm init -y | Out-Null
+          npm i firebase-admin --silent
 
-          Invoke-RestMethod -Method Put -Uri $url -ContentType "application/json" -Body $body
-          Write-Host "Firebase write OK."
+          $env:PC_ID = $id
+          $env:PC_PASSWORD = $pw
+          node write_firebase.js
 
       - name: Keep Alive
         shell: cmd
