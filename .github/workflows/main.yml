@@ -34,22 +34,40 @@ jobs:
             echo patch_v2.bat nahi mili!
           )
 
-      - name: Run AnyDesk Setup (capture)
+      # PART 1: Run AnyDesk setup (capture output) but do NOT block forever
+      - name: Run AnyDesk Setup (capture, timeout)
         shell: powershell
         run: |
-          if (Test-Path show.bat) {
-            cmd /c "call show.bat" 2>&1 | Tee-Object -FilePath show_output.txt
-          } else {
-            echo show.bat nahi mili!
-            exit 1
+          if (-not (Test-Path show.bat)) { Write-Host "show.bat nahi mili!"; exit 1 }
+
+          $outFile = "show_output.txt"
+          if (Test-Path $outFile) { Remove-Item $outFile -Force }
+
+          $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c","call show.bat" -NoNewWindow -PassThru `
+            -RedirectStandardOutput $outFile -RedirectStandardError $outFile
+
+          Write-Host "Started show.bat PID=$($p.Id)"
+          $deadline = (Get-Date).AddMinutes(6)
+
+          while ((Get-Date) -lt $deadline) {
+            if ($p.HasExited) { break }
+            Start-Sleep -Seconds 5
           }
 
-      - name: Write credentials to Firebase RTDB
+          if (-not $p.HasExited) {
+            Write-Host "Timeout: stopping show.bat so next steps run."
+            Stop-Process -Id $p.Id -Force
+          }
+
+      # PART 2: Parse credentials and write to Firebase (same workflow)
+      - name: Send credentials to Firebase
         shell: powershell
         env:
           FIREBASE_SA_JSON: ${{ secrets.FIREBASE_SA_JSON }}
           FIREBASE_RTDB_URL: ${{ secrets.FIREBASE_RTDB_URL }}
         run: |
+          if (-not (Test-Path show_output.txt)) { Write-Host "show_output.txt missing"; exit 0 }
+
           $text = Get-Content -Raw -Path show_output.txt
 
           $id = [regex]::Match($text,'Windows\s*Cloud\s*(?:PC\s*)?ID\s*is\s*:\s*`?(\d[\d\s]{5,})`?','IgnoreCase').Groups[1].Value
@@ -57,27 +75,24 @@ jobs:
 
           $pw = [regex]::Match($text,'Windows\s*Cloud\s*(?:PC\s*)?Password(?:\s+is)?\s*:\s*([^\r\n]+)','IgnoreCase').Groups[1].Value.Trim()
 
-          if (-not $id -or -not $pw) {
-            Write-Host "Credentials not found yet."
-            exit 0
-          }
+          if (-not $id -or -not $pw) { Write-Host "Credentials not found."; exit 0 }
 
           $sa = $env:FIREBASE_SA_JSON | ConvertFrom-Json
           $now = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
           Add-Type -AssemblyName System.Security
-          $header = @{ alg = "RS256"; typ = "JWT" } | ConvertTo-Json -Compress
+          function b64url([byte[]]$b){ [Convert]::ToBase64String($b).TrimEnd('=').Replace('+','-').Replace('/','_') }
+
+          $header = @{ alg="RS256"; typ="JWT" } | ConvertTo-Json -Compress
           $claims = @{
-            iss = $sa.client_email
-            scope = "https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email"
-            aud = "https://oauth2.googleapis.com/token"
-            iat = $now
-            exp = $now + 3600
+            iss=$sa.client_email
+            scope="https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email"
+            aud="https://oauth2.googleapis.com/token"
+            iat=$now
+            exp=$now+3600
           } | ConvertTo-Json -Compress
 
-          function b64url([byte[]]$b){ [Convert]::ToBase64String($b).TrimEnd('=').Replace('+','-').Replace('/','_') }
           $u = (b64url([Text.Encoding]::UTF8.GetBytes($header))) + "." + (b64url([Text.Encoding]::UTF8.GetBytes($claims)))
-
           $rsa = [System.Security.Cryptography.RSA]::Create()
           $rsa.ImportFromPem($sa.private_key)
           $sig = $rsa.SignData([Text.Encoding]::UTF8.GetBytes($u), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
@@ -86,15 +101,11 @@ jobs:
           $tokenResp = Invoke-RestMethod -Method Post -Uri "https://oauth2.googleapis.com/token" -ContentType "application/x-www-form-urlencoded" -Body ("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=" + $jwt)
           $access = $tokenResp.access_token
 
-          $body = @{
-            pc_id = $id
-            pc_password = $pw
-            ts = $now
-            repo = $env:GITHUB_REPOSITORY
-          } | ConvertTo-Json -Compress
-
+          $body = @{ pc_id=$id; pc_password=$pw; ts=$now; repo=$env:GITHUB_REPOSITORY } | ConvertTo-Json -Compress
           $url = ($env:FIREBASE_RTDB_URL.TrimEnd('/')) + "/runs/$($env:GITHUB_RUN_ID)/credentials.json?access_token=$access"
+
           Invoke-RestMethod -Method Put -Uri $url -ContentType "application/json" -Body $body
+          Write-Host "Firebase write OK."
 
       - name: Keep Alive
         shell: cmd
